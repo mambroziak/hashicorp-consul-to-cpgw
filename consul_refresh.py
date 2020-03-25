@@ -13,6 +13,56 @@ consul_conn_addr = '127.0.0.1:8500'
 # SSL Certificate Checking is disabled!
 requests.packages.urllib3.disable_warnings()
 
+def cp_login():
+    try:
+        cp_api_user = os.environ['cp_api_user']
+        cp_api_pw = os.environ['cp_api_pw']
+        print('Environment variables found for Check Point API credentials.')
+        except KeyError: 
+            print('Error reading environment variables for Check Point API credentials.')
+            os._exit(1)
+        
+        login_payload = {
+          'user': cp_api_user,
+          'password':cp_api_pw
+        }
+        
+        cp_auth_resp = cp_http_request(request_type='POST', url='/web_api/login', headers={'Content-Type': 'application/json'}, payload=login_payload, silent=False)
+        cp_auth_resp = json.loads(cp_auth_resp.content) 
+        print(cp_auth_resp['sid'])
+        return cp_auth_resp['sid']
+
+def cp_get_svcobject(headers, id, dest_port):
+    svc_object_id = ''
+    offset = 0
+    new_svcobjects = True
+    cp_showservicestcp_resp = cp_http_request(request_type='POST', url='/web_api/show-services-tcp', headers=headers, payload={'limit': 100, 'offset': offset, 'details-level': 'full'}, silent=True)
+    cp_showservicestcp_resp = json.loads(cp_showservicestcp_resp.content)
+    while new_svcobjects:
+        for svcobject in cp_showservicestcp_resp['objects']:
+            #print(svcobject['port'], svcobject['name'], svcobject['uid'])
+            if svcobject['port'] == dest_port:
+                svc_object_id = svcobject['uid']
+                print('\nExisting service object found: %s %s' % (svcobject['name'], svcobject['uid']))
+                break
+        offset += 100
+        cp_showservicestcp_resp = cp_http_request(request_type='POST', url='/web_api/show-services-tcp', headers=headers, payload={'limit': 100, 'offset': offset, 'details-level': 'full'}, silent=True)
+        cp_showservicestcp_resp = json.loads(cp_showservicestcp_resp.content)
+        new_svcobjects = cp_showservicestcp_resp['objects']
+
+    if svc_object_id == '':
+        print('\nExisting service object not found. Creating one...')
+        add_service_tcp_payload = {
+          'name': id,
+          'port': dest_port
+        }
+        print('\n' + json.dumps(add_service_tcp_payload, indent=2))
+        cp_addservicetcp_resp = cp_http_request(request_type='POST', url='/web_api/add-service-tcp', headers=headers, payload=add_service_tcp_payload, silent=False)
+        cp_addservicetcp_resp = json.loads(cp_addservicetcp_resp.content)
+        svc_object_id = cp_addservicetcp_resp['uid']
+        
+    return svc_object_id
+
 def poll_consul():
     c_intent_resp = consul_get_request(url='/v1/connect/intentions', silent=False)
     c_intent_resp = json.loads(c_intent_resp.content)
@@ -103,28 +153,13 @@ def main(argv=None):
     consul_intentions = poll_consul()
     print('\n' + json.dumps(consul_intentions, indent=2))
 
-    try:
-        cp_api_user = os.environ['cp_api_user']
-        cp_api_pw = os.environ['cp_api_pw']
-        print('Environment variables found for Check Point API credentials.')
-    except KeyError: 
-        print('Error reading environment variables for Check Point API credentials.')
-        os._exit(1)
-    
-    login_payload = {
-      'user': cp_api_user,
-      'password':cp_api_pw
-    }
-    
-    cp_auth_resp = cp_http_request(request_type='POST', url='/web_api/login', headers={'Content-Type': 'application/json'}, payload=login_payload, silent=False)
-    cp_auth_resp = json.loads(cp_auth_resp.content)
-    cp_api_sid = cp_auth_resp['sid']
-    print(cp_api_sid)
+    #CP Login and get SID
+    cp_sid = cp_login()
     
     headers = {
       'Content-Type': "application/json",
       'Cache-Control': "no-cache",
-      'X-chkp-sid': cp_auth_resp['sid']
+      'X-chkp-sid': cp_sid
     }
     
     for c_intent in consul_intentions:
@@ -143,37 +178,9 @@ def main(argv=None):
         print(add_hosts_payload)
         for host_payload in add_hosts_payload:
             cp_addhost_resp = cp_http_request(request_type='POST', url='/web_api/add-host', headers=headers, payload=host_payload, silent=False)
-
-
         
-        svc_object_id = ''
-        offset = 0
-        new_svcobjects = True
-        cp_showservicestcp_resp = cp_http_request(request_type='POST', url='/web_api/show-services-tcp', headers=headers, payload={'limit': 100, 'offset': offset, 'details-level': 'full'}, silent=True)
-        cp_showservicestcp_resp = json.loads(cp_showservicestcp_resp.content)
-        while new_svcobjects:
-            for svcobject in cp_showservicestcp_resp['objects']:
-                #print(svcobject['port'], svcobject['name'], svcobject['uid'])
-                if svcobject['port'] == c_intent['destination']['localServicePort']:
-                    svc_object_id = svcobject['uid']
-                    print('\nExisting service object found: %s %s' % (svcobject['name'], svcobject['uid']))
-                    break
-            offset += 100
-            cp_showservicestcp_resp = cp_http_request(request_type='POST', url='/web_api/show-services-tcp', headers=headers, payload={'limit': 100, 'offset': offset, 'details-level': 'full'}, silent=True)
-            cp_showservicestcp_resp = json.loads(cp_showservicestcp_resp.content)
-            new_svcobjects = cp_showservicestcp_resp['objects']
-
-        if svc_object_id == '':
-            print('\nExisting service object not found. Creating one...')
-            add_service_tcp_payload = {
-              'name': c_intent['id'],
-              'port': str(c_intent['destination']['localServicePort'])
-            }
-            print('\n' + json.dumps(add_service_tcp_payload, indent=2))
-            cp_addservicetcp_resp = cp_http_request(request_type='POST', url='/web_api/add-service-tcp', headers=headers, payload=add_service_tcp_payload, silent=False)
-            cp_addservicetcp_resp = json.loads(cp_addservicetcp_resp.content)
-            svc_object_id = cp_addservicetcp_resp['uid']
-
+        svc_object_id = cp_get_svcobject(headers=headers, id=c_intent['id'], dest_port=c_intent['destination']['localServicePort'])
+        
         if c_intent['action'] == 'allow':
             fw_action = 'Accept'
             fw_position = 'top'

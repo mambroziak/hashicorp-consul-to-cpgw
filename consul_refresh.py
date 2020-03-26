@@ -17,22 +17,44 @@ def cp_login():
     try:
         cp_api_user = os.environ['cp_api_user']
         cp_api_pw = os.environ['cp_api_pw']
-        print('Environment variables found for Check Point API credentials.')
-        except KeyError: 
-            print('Error reading environment variables for Check Point API credentials.')
-            os._exit(1)
-        
-        login_payload = {
-          'user': cp_api_user,
-          'password':cp_api_pw
-        }
-        
-        cp_auth_resp = cp_http_request(request_type='POST', url='/web_api/login', headers={'Content-Type': 'application/json'}, payload=login_payload, silent=False)
-        cp_auth_resp = json.loads(cp_auth_resp.content) 
-        print(cp_auth_resp['sid'])
-        return cp_auth_resp['sid']
+        print('\nEnvironment variables found for Check Point API credentials.')
+    except KeyError:
+        print('\nError reading environment variables for Check Point API credentials.')
+        os._exit(1)
 
-def cp_get_svcobject(headers, id, dest_port):
+    payload = {
+      'user': cp_api_user,
+      'password':cp_api_pw
+    }
+
+    resp = cp_http_request(request_type='POST', url='/web_api/login', headers={'Content-Type': 'application/json'}, payload=payload, silent=False)
+    resp = json.loads(resp.content)
+    print(resp['sid'])
+    return resp['sid']
+        
+def cp_publish(headers):
+    print('\nPublishing session changes...')
+    resp = cp_http_request(request_type='POST', url='/web_api/publish', headers=headers, payload={}, silent=False)
+    
+def cp_discard(headers):
+    print('\nDiscarding session changes...')
+    resp = cp_http_request(request_type='POST', url='/web_api/discard', headers=headers, payload={}, silent=False)
+
+def cp_get_object_host(headers, host_payload):
+    query_payload = {'name': host_payload['name']}
+    resp = cp_http_request(request_type='POST', url='/web_api/show-host', headers=headers, payload=query_payload, silent=True)
+    resp = json.loads(resp.content)
+    print(host_payload)
+    if 'name' in resp.keys():
+        print('\nExisting host object found.')
+        return resp['name']
+    else:
+        print('\nCreating new host object...')
+        cp_addhost_resp = cp_http_request(request_type='POST', url='/web_api/add-host', headers=headers, payload=host_payload, silent=False)
+        cp_addhost_resp = json.loads(cp_addhost_resp.content)
+        return cp_addhost_resp['name']
+
+def cp_get_object_svc(headers, id, dest_port):
     svc_object_id = ''
     offset = 0
     new_svcobjects = True
@@ -155,7 +177,6 @@ def main(argv=None):
 
     #CP Login and get SID
     cp_sid = cp_login()
-    
     headers = {
       'Content-Type': "application/json",
       'Cache-Control': "no-cache",
@@ -175,11 +196,11 @@ def main(argv=None):
           'ip-address' : '10.1.10.11'
           #'ip-address' : c_intent['destination']['localServiceAddress']
         }]
-        print(add_hosts_payload)
+
         for host_payload in add_hosts_payload:
-            cp_addhost_resp = cp_http_request(request_type='POST', url='/web_api/add-host', headers=headers, payload=host_payload, silent=False)
-        
-        svc_object_id = cp_get_svcobject(headers=headers, id=c_intent['id'], dest_port=c_intent['destination']['localServicePort'])
+            cp_get_object_host(headers, host_payload)
+            
+        svc_object_id = cp_get_object_svc(headers=headers, id=c_intent['id'], dest_port=c_intent['destination']['localServicePort'])
         
         if c_intent['action'] == 'allow':
             fw_action = 'Accept'
@@ -199,16 +220,9 @@ def main(argv=None):
         }
         print('\n' + json.dumps(add_access_rule_payload, indent=2))
         cp_addaccessrule_resp = cp_http_request(request_type='POST', url='/web_api/add-access-rule', headers=headers, payload=add_access_rule_payload, silent=False)
-    
-    show_hosts_payload = {
-      'limit' : 50,
-      'offset' : 0,
-      'details-level' : 'standard'
-    }
-    
-    #cp_showhosts_resp = cp_http_request(request_type='POST', url='/web_api/show-hosts', headers=headers, payload=show_hosts_payload, silent=False)
-    print('Publish...')
-    cp_publish_resp = cp_http_request(request_type='POST', url='/web_api/publish', headers=headers, payload={}, silent=False)
-    
+
+        cp_publish(headers)
+        #cp_discard(headers)
+
 if __name__ == "__main__":
     sys.exit(main())

@@ -1,51 +1,61 @@
-#!/usr/bin/env/python3
-from typing import Any
+#!/usr/bin/env/python
 
 import json
 import sys
-import requests
 import os
+import requests
 from requests.exceptions import HTTPError
+import argparse
+from argparse import RawTextHelpFormatter
+from datetime import datetime
 import random
 
-cp_conn_addr = '3.227.98.36'
-consul_conn_addr = '127.0.0.1:8500'
+OPTIONS = ''
 
 # SSL Certificate Checking is disabled!
 requests.packages.urllib3.disable_warnings()
 
+
 def cp_login():
+    cp_api_user = ''
+    cp_api_pw = ''
+
     try:
         cp_api_user = os.environ['cp_api_user']
         cp_api_pw = os.environ['cp_api_pw']
         print('\nEnvironment variables found for Check Point API credentials.')
     except KeyError:
         print('\nError reading environment variables for Check Point API credentials.')
-        os._exit(1)
+        exit(code=1)
 
     payload = {
-      'user': cp_api_user,
-      'password':cp_api_pw
+        'user': cp_api_user,
+        'password': cp_api_pw
     }
 
-    resp = cp_http_request(request_type='POST', url='/web_api/login', headers={'Content-Type': 'application/json'}, payload=payload, silent=False)
+    resp = cp_http_request(url='/web_api/login', headers={'Content-Type': 'application/json'},
+                           payload=payload, silent=False)
     resp = json.loads(resp.content)
     print(resp['sid'])
     return resp['sid']
-        
+
+
 def cp_publish(headers):
     print('\nPublishing session changes...')
-    resp = cp_http_request(request_type='POST', url='/web_api/publish', headers=headers, payload={}, silent=False)
-    
+    cp_http_request(url='/web_api/publish', headers=headers, payload={}, silent=False)
+
+
 def cp_discard(headers):
     print('\nDiscarding session changes...')
-    resp = cp_http_request(request_type='POST', url='/web_api/discard', headers=headers, payload={}, silent=False)
+    cp_http_request(url='/web_api/discard', headers=headers, payload={}, silent=False)
 
-def cp_get_object_host(headers, host_payload):
+
+def cp_add_object_host(headers, host_payload):
     query_payload = {'name': host_payload['name']}
     print(host_payload)
 
-    resp = cp_http_request(request_type='POST', url='/web_api/show-host', headers=headers, payload=query_payload, silent=True)
+    resp = cp_http_request(url='/web_api/show-host', headers=headers, payload=query_payload,
+                           silent=True)
     resp = json.loads(resp.content)
 
     if 'name' in resp.keys():
@@ -53,148 +63,207 @@ def cp_get_object_host(headers, host_payload):
         return resp['name']
     else:
         print('\nCreating new host object...')
-        cp_addhost_resp = cp_http_request(request_type='POST', url='/web_api/add-host', headers=headers, payload=host_payload, silent=False)
+        cp_addhost_resp = cp_http_request(url='/web_api/add-host', headers=headers,
+                                          payload=host_payload, silent=False)
         cp_addhost_resp = json.loads(cp_addhost_resp.content)
         return cp_addhost_resp['name']
 
-def cp_get_object_svc(headers, id, dest_port):
+
+def cp_add_object_service(headers, consul_id, dest_port):
     svc_object_id = ''
     offset = 0
     new_svcobjects = True
-    cp_showservicestcp_resp = cp_http_request(request_type='POST', url='/web_api/show-services-tcp', headers=headers, payload={'limit': 100, 'offset': offset, 'details-level': 'full'}, silent=True)
+    cp_showservicestcp_resp = cp_http_request(url='/web_api/show-services-tcp', headers=headers,
+                                              payload={'limit': 100, 'offset': offset, 'details-level': 'full'},
+                                              silent=True)
     cp_showservicestcp_resp = json.loads(cp_showservicestcp_resp.content)
     while new_svcobjects:
         for svcobject in cp_showservicestcp_resp['objects']:
-#           print(svcobject['port'], svcobject['name'], svcobject['uid'])
             if svcobject['port'] == dest_port:
                 svc_object_id = svcobject['uid']
                 print('\nExisting service object found: %s / %s' % (svcobject['name'], svcobject['uid']))
                 break
         offset += 100
-        cp_showservicestcp_resp = cp_http_request(request_type='POST', url='/web_api/show-services-tcp', headers=headers, payload={'limit': 100, 'offset': offset, 'details-level': 'full'}, silent=True)
+        cp_showservicestcp_resp = cp_http_request(url='/web_api/show-services-tcp',
+                                                  headers=headers,
+                                                  payload={'limit': 100, 'offset': offset, 'details-level': 'full'},
+                                                  silent=True)
         cp_showservicestcp_resp = json.loads(cp_showservicestcp_resp.content)
         new_svcobjects = cp_showservicestcp_resp['objects']
 
     if svc_object_id == '':
         print('\nExisting service object not found. Creating one...')
-        new_service_name = 'consul-' + id[0:12]
+        new_service_name = 'consul-' + consul_id[0:12]
         add_service_tcp_payload = {
-          'name': new_service_name,
-          'port': dest_port
+            'name': new_service_name,
+            'port': dest_port
         }
         print('\n' + json.dumps(add_service_tcp_payload, indent=2))
-        cp_addservicetcp_resp = cp_http_request(request_type='POST', url='/web_api/add-service-tcp', headers=headers, payload=add_service_tcp_payload, silent=False)
+        cp_addservicetcp_resp = cp_http_request(url='/web_api/add-service-tcp', headers=headers,
+                                                payload=add_service_tcp_payload, silent=False)
         cp_addservicetcp_resp = json.loads(cp_addservicetcp_resp.content)
         svc_object_id = cp_addservicetcp_resp['uid']
-        
+
     return svc_object_id
 
-def poll_consul():
+
+def consul_get_intentions():
     c_intent_resp = consul_get_request(url='/v1/connect/intentions', silent=False)
     c_intent_resp = json.loads(c_intent_resp.content)
-#    print('\n' + json.dumps(resp, indent=2))
+    if OPTIONS.verbose:
+        print('\n' + json.dumps(resp, indent=2))
 
     intentions = []
     for intention in c_intent_resp:
-        print('\nID: %s\nSource: %s\nDestination: %s\nAction: %s' % (intention['ID'], intention['SourceName'], intention['DestinationName'], intention['Action']) )
-        
-        c_src_svccat_resp = consul_get_request(url='/v1/catalog/service/' + intention['SourceName'] + '-sidecar-proxy', silent=True)
+        print('\nID: %s\nSource: %s\nDestination: %s\nAction: %s' % (
+            intention['ID'], intention['SourceName'], intention['DestinationName'], intention['Action']
+            )
+        )
+
+        c_src_svccat_resp = consul_get_request(url='/v1/catalog/service/' + intention['SourceName'] + '-sidecar-proxy',
+                                               silent=True)
         c_src_svccat_resp = json.loads(c_src_svccat_resp.content)
-#        print('\n' + json.dumps(c_src_svccat_resp, indent=2))
+        if OPTIONS.verbose:
+            print('\n' + json.dumps(c_src_svccat_resp, indent=2))
 
-        c_dest_svccat_resp = consul_get_request(url='/v1/catalog/service/' + intention['DestinationName'] + '-sidecar-proxy', silent=True)
+        c_dest_svccat_resp = consul_get_request(
+            url='/v1/catalog/service/' + intention['DestinationName'] + '-sidecar-proxy', silent=True)
         c_dest_svccat_resp = json.loads(c_dest_svccat_resp.content)
-#        print('\n' + json.dumps(c_dest_svccat_resp, indent=2))
+        if OPTIONS.verbose:
+            print('\n' + json.dumps(c_dest_svccat_resp, indent=2))
 
-        if intention['Meta']['check_point_fw_layer']:
+        if 'check_point_fw_layer' in intention['Meta']:
             # Read cosul intention metadata for Check Point Firewall layer value
             fw_layer = intention['Meta']['check_point_fw_layer']
         else:
             # Check Point Default layer
             print('Missing check_point_fw_layer in consul intention metadata. Setting layer to "Network" (Default)')
             fw_layer = 'Network'
-    
+
         intentions.append({
-          'id': intention['ID'].replace('-',''),
-          'action': intention['Action'],
-          'fw_layer': fw_layer,
-          'source': {
-            'name': intention['SourceName'],
-            'localServiceAddress': c_src_svccat_resp[0]['ServiceProxy']['LocalServiceAddress'],
-            'localServicePort': str(c_src_svccat_resp[0]['ServiceProxy']['LocalServicePort']),
-            'localBindPort': str(c_src_svccat_resp[0]['ServiceProxy']['Upstreams'][0]['LocalBindPort'])
+            'id': intention['ID'].replace('-', ''),
+            'action': intention['Action'],
+            'fw_layer': fw_layer,
+            'source': {
+                'name': intention['SourceName'],
+                'localServiceAddress': c_src_svccat_resp[0]['ServiceProxy']['LocalServiceAddress'],
+                'localServicePort': str(c_src_svccat_resp[0]['ServiceProxy']['LocalServicePort']),
+                'localBindPort': str(c_src_svccat_resp[0]['ServiceProxy']['Upstreams'][0]['LocalBindPort'])
             },
-          'destination': {
-            'name': intention['DestinationName'],
-            'localServiceAddress': c_dest_svccat_resp[0]['ServiceProxy']['LocalServiceAddress'],
-            'localServicePort': str(c_dest_svccat_resp[0]['ServiceProxy']['LocalServicePort'])
-          }
+            'destination': {
+                'name': intention['DestinationName'],
+                'localServiceAddress': c_dest_svccat_resp[0]['ServiceProxy']['LocalServiceAddress'],
+                'localServicePort': str(c_dest_svccat_resp[0]['ServiceProxy']['LocalServicePort'])
+            }
         })
-    
+
     return intentions
 
-def cp_http_request(request_type, url, headers, payload, silent): 
 
-    # request_type = post/delete/get
-    request_type = request_type.lower()
+def cp_http_request(url, headers, payload, silent):
     # silent = True/False
 
     resp = ''
     verify = False
 
     try:
-        if request_type.lower() == 'post':
-            resp = requests.post('https://' + cp_conn_addr + url, json=payload, headers=headers, verify=verify)
-        elif request_type.lower() == 'delete':
-            resp = requests.delete('https://' + cp_conn_addr + url, json=payload, headers=headers, verify=verify)
-        elif request_type.lower() == 'get':
-            resp = requests.get('https://' + cp_conn_addr + url, json=payload, headers=headers, verify=verify)
-        else:
-            print('Request type not supported.')
-            return False
-        
+        resp = requests.post('https://' + OPTIONS.cp_mgmt_ip + url, json=payload, headers=headers, verify=verify)
         resp.raise_for_status()
     except HTTPError as http_err:
-        print('HTTP error occurred: %s' % http_err) 
+        if not silent:
+            print('HTTP error occurred: %s' % http_err)
     except Exception as err:
-        print('Other error occurred: %s' % err)   
+        print('Other error occurred: %s' % err)
     else:
         if not silent:
             print('Success!')
-    
+
     return resp
 
-def consul_get_request(url, silent): 
+
+def consul_get_request(url, silent):
     # silent = True/False
 
     headers = {'content-type': 'application/json'}
     resp = ''
     try:
-        resp = requests.get('http://' + consul_conn_addr + url, headers=headers)
+        resp = requests.get('http://' + OPTIONS.consul_socket + url, headers=headers)
         resp.raise_for_status()
     except HTTPError as http_err:
-        print('HTTP error occurred: %s' % http_err) 
+        if not silent:
+            print('HTTP error occurred: %s' % http_err)
     except Exception as err:
-        print('Other error occurred: %s' % err)  
+        print('Other error occurred: %s' % err)
     else:
         if not silent:
             print('Success!')
-    
+
     return resp
 
-def main(argv=None):
-    global cp_conn_addr, consul_conn_addr
 
-    #CP Login and get SID
+def main(argv=None):
+    global OPTIONS
+
+    # define argparse helper meta
+    example_text = 'Example: \n %s --account 1234567 --key 12345678Z-2jAnRQlUHgjjKE12345678 --minutes 1 --product all --verbose ' % \
+                   sys.argv[0]
+
+    parser = argparse.ArgumentParser(
+        epilog=example_text,
+        formatter_class=RawTextHelpFormatter)
+    parser._action_groups.pop()
+    required = parser.add_argument_group('required arguments')
+    optional = parser.add_argument_group('optional arguments')
+
+    # Add arguments to argparse
+    required.add_argument('--cp-mgmt-ip',
+                          dest='cp_mgmt_ip',
+                          help='Check Point Management Server IP (e.g. 10.10.1.254)',
+                          required=True)
+    required.add_argument('--consul-socket',
+                          dest='consul_socket',
+                          help='Consul socket address (e.g. 10.20.1.254:8500)',
+                          required=True)
+    optional.add_argument('--demo-mode',
+                          dest='demo_mode',
+                          default=False,
+                          help='Demo mode. Consul intention source/destination IPs autogenerated',
+                          action='store_true')
+    optional.add_argument('--dry-run',
+                          dest='dry_run',
+                          default=False,
+                          help='Dry Run',
+                          action='store_true')
+    optional.add_argument('--verbose',
+                          dest='verbose',
+                          default=False,
+                          help='Verbose output',
+                          action='store_true')
+
+    OPTIONS = parser.parse_args(argv)
+    if OPTIONS.cp_mgmt_ip and OPTIONS.consul_socket:
+        print('\n:: HashiCorp Consul to Check Point firewall integration :: \nExecution time: %s \n' % str(datetime.now())
+        )
+    else:
+        parser.print_help()
+        exit(code=1)
+
+    if OPTIONS.dry_run:
+        print('\nDry run enabled. Check Point Management session will be discarded at the end.')
+
+    if OPTIONS.demo_mode:
+        print('\nDemo mode enabled. Consul intention source and destination IPs will be autogenerated.')
+
+    # CP Login and get SID
     cp_sid = cp_login()
     print('sid: %s' % cp_sid)
     headers = {
-      'Content-Type': "application/json",
-      'Cache-Control': "no-cache",
-      'X-chkp-sid': cp_sid
+        'Content-Type': "application/json",
+        'Cache-Control': "no-cache",
+        'X-chkp-sid': cp_sid
     }
 
-    consul_intentions = poll_consul()
+    consul_intentions = consul_get_intentions()
     print('\n' + json.dumps(consul_intentions, indent=2))
 
     print('No. of Consul intention records found: %s' % str(len(consul_intentions)))
@@ -204,23 +273,33 @@ def main(argv=None):
         src_host_name = c_intent['source']['name'] + '.service.consul'
         dest_host_name = c_intent['destination']['name'] + '.service.consul'
 
+        src_ip = ''
+        dest_ip = ''
+        if OPTIONS.demo_mode:
+            src_ip = '192.168.' + str(random.randrange(1, 254)) + '.' + str(random.randrange(1, 254))
+            dest_ip = '10.1.' + str(random.randrange(1, 254)) + '.' + str(random.randrange(1, 254))
+        else:
+            src_ip = c_intent['source']['localServiceAddress']
+            dest_ip = c_intent['destination']['localServiceAddress']
+
         add_hosts_payload = [{
-          'name' : src_host_name,
-          'ip-address' : '192.168.' + str(random.randrange(1, 254)) + '.' + str(random.randrange(1, 254))
-          #'ip-address' : c_intent['source']['localServiceAddress']
+            'name': src_host_name,
+            'ip-address': src_ip
         },
-        {
-          'name': dest_host_name,
-          'ip-address' : '10.1.' + str(random.randrange(1, 254)) + '.' + str(random.randrange(1, 254))
-          #'ip-address' : c_intent['destination']['localServiceAddress']
-        }]
+            {
+                'name': dest_host_name,
+                'ip-address': dest_ip
+            }]
 
         for host_payload in add_hosts_payload:
             print('\nProcessing host: %s' % host_payload['name'])
-            cp_get_object_host(headers, host_payload)
-            
-        svc_object_id = cp_get_object_svc(headers=headers, id=c_intent['id'], dest_port=c_intent['destination']['localServicePort'])
-        
+            cp_add_object_host(headers, host_payload)
+
+        svc_object_id = cp_add_object_service(headers=headers, consul_id=c_intent['id'],
+                                              dest_port=c_intent['destination']['localServicePort'])
+
+        fw_action = ''
+        fw_position = ''
         if c_intent['action'] == 'allow':
             fw_position = 'top'
             fw_action = 'Accept'
@@ -233,19 +312,25 @@ def main(argv=None):
         print('\nProcessing access rule: %s/%s -> %s @ %s' % (fw_action, src_host_name, dest_host_name, fw_layer))
         new_rule_name = 'consul-' + c_intent['id'][0:12]
         add_access_rule_payload = {
-          'layer': fw_layer,
-          'position': fw_position,
-          'name': new_rule_name,
-          'source': src_host_name,
-          'destination': dest_host_name,
-          'service': svc_object_id,
-          'action': fw_action
+            'layer': fw_layer,
+            'position': fw_position,
+            'name': new_rule_name,
+            'source': src_host_name,
+            'destination': dest_host_name,
+            'service': svc_object_id,
+            'action': fw_action
         }
         print('\n' + json.dumps(add_access_rule_payload, indent=2))
-        cp_addaccessrule_resp = cp_http_request(request_type='POST', url='/web_api/add-access-rule', headers=headers, payload=add_access_rule_payload, silent=False)
+        cp_http_request(url='/web_api/add-access-rule', headers=headers,
+                                                payload=add_access_rule_payload, silent=False)
 
-    #cp_publish(headers)
-    cp_discard(headers)
+    if OPTIONS.dry_run:
+        # Dry run, discard all posted changes in session.
+        cp_discard(headers)
+    else:
+        # Game on. Changes in session will be published.
+        cp_publish(headers)
+
 
 if __name__ == "__main__":
     sys.exit(main())

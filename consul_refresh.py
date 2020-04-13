@@ -50,16 +50,96 @@ def cp_discard(headers):
     cp_http_request(url='/web_api/discard', headers=headers, payload={}, silent=False)
 
 
+def process_intentions(headers):
+    process_failures = 0
+    process_successes = 0
+    consul_intentions = consul_get_intentions()
+    print('\n' + json.dumps(consul_intentions, indent=2))
+
+    print('No. of Consul intention records found: %s' % str(len(consul_intentions)))
+    for c_intent in consul_intentions:
+        print('\n----------------------------\nProcessing next Consul intention...\n----------------------------')
+        new_rule_name = 'consul-' + c_intent['id'][0:12]
+        fw_layer = c_intent['fw_layer']
+
+        cp_access_rule_exists = cp_get_access_rule_exists(headers, new_rule_name, fw_layer)
+        if cp_access_rule_exists:
+            continue
+
+        src_host_name = c_intent['source']['name'] + '.service.consul'
+        dest_host_name = c_intent['destination']['name'] + '.service.consul'
+
+        if OPTIONS.demo_mode:
+            src_ip = '192.168.' + str(random.randrange(1, 254)) + '.' + str(random.randrange(1, 254))
+            dest_ip = '10.1.' + str(random.randrange(1, 254)) + '.' + str(random.randrange(1, 254))
+        else:
+            src_ip = c_intent['source']['localServiceAddress']
+            dest_ip = c_intent['destination']['localServiceAddress']
+
+        add_hosts_payload = [{
+            'name': src_host_name,
+            'ip-address': src_ip
+        },
+            {
+                'name': dest_host_name,
+                'ip-address': dest_ip
+            }]
+
+        for host_payload in add_hosts_payload:
+
+            print('\nProcessing host: %s' % host_payload['name'])
+            cp_add_object_host(headers, host_payload)
+
+        svc_object_id = cp_add_object_service(headers=headers, consul_id=c_intent['id'],
+                                              dest_port=c_intent['destination']['localServicePort'])
+
+        fw_action = ''
+        fw_position = ''
+        if c_intent['action'] == 'allow':
+            fw_position = 'top'
+            fw_action = 'Accept'
+        elif c_intent['action'] == 'deny':
+            fw_position = 'top'
+            fw_action = 'Drop'
+
+        print('\nProcessing access rule: %s/%s -> %s @ %s' % (fw_action, src_host_name, dest_host_name, fw_layer))
+
+        add_access_rule_payload = {
+            'layer': fw_layer,
+            'position': fw_position,
+            'name': new_rule_name,
+            'source': src_host_name,
+            'destination': dest_host_name,
+            'service': svc_object_id,
+            'action': fw_action
+        }
+        print('\n' + json.dumps(add_access_rule_payload, indent=2))
+        access_rule_resp = cp_http_request(url='/web_api/add-access-rule', headers=headers,
+                                           payload=add_access_rule_payload, silent=False)
+
+        if access_rule_resp:
+            process_successes += 1
+        else:
+            print('\nError inserting new rule.')
+            process_failures += 1
+            continue
+
+    print('\nConsul-CheckPoint\nSync Status Report:\n  Successes: %s\n  Failures: %s' % (process_successes, process_failures))
+    report = {'successes': process_successes, 'failures': process_failures}
+    return report
+
+
 def cp_add_object_host(headers, host_payload):
     query_payload = {'name': host_payload['name']}
-    print(host_payload)
+    if OPTIONS.verbose:
+        print(host_payload)
 
     resp = cp_http_request(url='/web_api/show-host', headers=headers, payload=query_payload,
                            silent=True)
     resp = json.loads(resp.content)
 
     if 'name' in resp.keys():
-        print('\nExisting host object found.')
+        print('Existing host object found.')
         return resp['name']
     else:
         print('\nCreating new host object...')
@@ -107,18 +187,38 @@ def cp_add_object_service(headers, consul_id, dest_port):
     return svc_object_id
 
 
+def cp_get_access_rule_exists(headers, fw_rule_name, fw_layer):
+    query_payload = {'name': fw_rule_name, 'layer': fw_layer}
+    if OPTIONS.verbose:
+        silent = False
+        print('\nChecking if rule exists:')
+        print(query_payload)
+    else:
+        silent = True
+
+    resp = cp_http_request(url='/web_api/show-access-rule', headers=headers, payload=query_payload,
+                           silent=silent)
+    resp = json.loads(resp.content)
+
+    if 'code' not in resp and fw_rule_name == resp['name']:
+        print('\nExisting Check Point firewall access rule found with name: %s' % fw_rule_name)
+        return True
+    else:
+        return False
+
+
 def consul_get_intentions():
     c_intent_resp = consul_get_request(url='/v1/connect/intentions', silent=False)
     c_intent_resp = json.loads(c_intent_resp.content)
     if OPTIONS.verbose:
-        print('\n' + json.dumps(resp, indent=2))
+        print('\n' + json.dumps(c_intent_resp, indent=2))
 
     intentions = []
     for intention in c_intent_resp:
         print('\nID: %s\nSource: %s\nDestination: %s\nAction: %s' % (
             intention['ID'], intention['SourceName'], intention['DestinationName'], intention['Action']
-            )
         )
+              )
 
         c_src_svccat_resp = consul_get_request(url='/v1/catalog/service/' + intention['SourceName'] + '-sidecar-proxy',
                                                silent=True)
@@ -137,6 +237,7 @@ def consul_get_intentions():
             fw_layer = intention['Meta']['check_point_fw_layer']
         else:
             # Check Point Default layer
+            # You may want to change this so that fails instead of assuming the Network layer
             print('Missing check_point_fw_layer in consul intention metadata. Setting layer to "Network" (Default)')
             fw_layer = 'Network'
 
@@ -205,7 +306,7 @@ def main(argv=None):
     global OPTIONS
 
     # define argparse helper meta
-    example_text = 'Example: \n %s --account 1234567 --key 12345678Z-2jAnRQlUHgjjKE12345678 --minutes 1 --product all --verbose ' % \
+    example_text = 'Example: \n %s --cp-mgmt-ip 3.4.5.6 --consul-socket 7.8.9.10:8500' % \
                    sys.argv[0]
 
     parser = argparse.ArgumentParser(
@@ -242,17 +343,18 @@ def main(argv=None):
 
     OPTIONS = parser.parse_args(argv)
     if OPTIONS.cp_mgmt_ip and OPTIONS.consul_socket:
-        print('\n:: HashiCorp Consul to Check Point firewall integration :: \nExecution time: %s \n' % str(datetime.now())
-        )
+        print(
+            '\n:: HashiCorp Consul to Check Point firewall integration :: \nExecution time: %s \n' % str(datetime.now())
+            )
     else:
         parser.print_help()
         exit(code=1)
 
     if OPTIONS.dry_run:
-        print('\nDry run enabled. Check Point Management session will be discarded at the end.')
+        print('\nDry run enabled.')
 
     if OPTIONS.demo_mode:
-        print('\nDemo mode enabled. Consul intention source and destination IPs will be autogenerated.')
+        print('\nDemo mode enabled: Consul intention source and destination IPs will be autogenerated.')
 
     # CP Login and get SID
     cp_sid = cp_login()
@@ -263,73 +365,21 @@ def main(argv=None):
         'X-chkp-sid': cp_sid
     }
 
-    consul_intentions = consul_get_intentions()
-    print('\n' + json.dumps(consul_intentions, indent=2))
+    # process intentions and insert access rules into Check Point appliance
+    process_report = process_intentions(headers)
 
-    print('No. of Consul intention records found: %s' % str(len(consul_intentions)))
-    for c_intent in consul_intentions:
-        print('\n----------------------------\nProcessing next Consul intention...\n----------------------------')
-
-        src_host_name = c_intent['source']['name'] + '.service.consul'
-        dest_host_name = c_intent['destination']['name'] + '.service.consul'
-
-        src_ip = ''
-        dest_ip = ''
-        if OPTIONS.demo_mode:
-            src_ip = '192.168.' + str(random.randrange(1, 254)) + '.' + str(random.randrange(1, 254))
-            dest_ip = '10.1.' + str(random.randrange(1, 254)) + '.' + str(random.randrange(1, 254))
+    if process_report['successes'] >= 1:
+        print('\nConsul intentions and Check Point access rules have been synchronized.')
+        if OPTIONS.dry_run:
+            # Dry run, discard all posted changes in session.
+            print('\nDry run enabled. Changes will not be saved.')
+            cp_discard(headers)
         else:
-            src_ip = c_intent['source']['localServiceAddress']
-            dest_ip = c_intent['destination']['localServiceAddress']
-
-        add_hosts_payload = [{
-            'name': src_host_name,
-            'ip-address': src_ip
-        },
-            {
-                'name': dest_host_name,
-                'ip-address': dest_ip
-            }]
-
-        for host_payload in add_hosts_payload:
-            print('\nProcessing host: %s' % host_payload['name'])
-            cp_add_object_host(headers, host_payload)
-
-        svc_object_id = cp_add_object_service(headers=headers, consul_id=c_intent['id'],
-                                              dest_port=c_intent['destination']['localServicePort'])
-
-        fw_action = ''
-        fw_position = ''
-        if c_intent['action'] == 'allow':
-            fw_position = 'top'
-            fw_action = 'Accept'
-        elif c_intent['action'] == 'deny':
-            fw_position = 'top'
-            fw_action = 'Drop'
-
-        fw_layer = c_intent['fw_layer']
-
-        print('\nProcessing access rule: %s/%s -> %s @ %s' % (fw_action, src_host_name, dest_host_name, fw_layer))
-        new_rule_name = 'consul-' + c_intent['id'][0:12]
-        add_access_rule_payload = {
-            'layer': fw_layer,
-            'position': fw_position,
-            'name': new_rule_name,
-            'source': src_host_name,
-            'destination': dest_host_name,
-            'service': svc_object_id,
-            'action': fw_action
-        }
-        print('\n' + json.dumps(add_access_rule_payload, indent=2))
-        cp_http_request(url='/web_api/add-access-rule', headers=headers,
-                                                payload=add_access_rule_payload, silent=False)
-
-    if OPTIONS.dry_run:
-        # Dry run, discard all posted changes in session.
-        cp_discard(headers)
+            # Game on. Changes in session will be published.
+            cp_publish(headers)
     else:
-        # Game on. Changes in session will be published.
-        cp_publish(headers)
+        print('\nNo new changes to publish. Review the status report.')
+        cp_discard(headers)
 
 
 if __name__ == "__main__":

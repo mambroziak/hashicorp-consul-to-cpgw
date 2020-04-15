@@ -53,6 +53,7 @@ def cp_discard(headers):
 def process_intentions(headers):
     process_failures = 0
     process_successes = 0
+    process_skips = 0
     consul_intentions = consul_get_intentions()
     print('\n' + json.dumps(consul_intentions, indent=2))
 
@@ -60,10 +61,17 @@ def process_intentions(headers):
     for c_intent in consul_intentions:
         print('\n----------------------------\nProcessing next Consul intention...\n----------------------------')
         new_rule_name = 'consul-' + c_intent['id'][0:12]
-        fw_layer = c_intent['fw_layer']
+        access_layer = c_intent['access_layer']
 
-        cp_access_rule_exists = cp_get_access_rule_exists(headers, new_rule_name, fw_layer)
+        cp_access_layer_exists = cp_get_accesslayer_exists(headers, access_layer)
+        if not cp_access_layer_exists:
+            print('Check Point access layer not found: %s. Skipping intention...' % access_layer)
+            process_failures += 1
+            continue
+
+        cp_access_rule_exists = cp_get_access_rule_exists(headers, new_rule_name, access_layer)
         if cp_access_rule_exists:
+            process_skips += 1
             continue
 
         src_host_name = c_intent['source']['name'] + '.service.consul'
@@ -102,10 +110,10 @@ def process_intentions(headers):
             fw_position = 'top'
             fw_action = 'Drop'
 
-        print('\nProcessing access rule: %s/%s -> %s @ %s' % (fw_action, src_host_name, dest_host_name, fw_layer))
+        print('\nProcessing access rule: %s/%s -> %s @ %s' % (fw_action, src_host_name, dest_host_name, access_layer))
 
         add_access_rule_payload = {
-            'layer': fw_layer,
+            'layer': access_layer,
             'position': fw_position,
             'name': new_rule_name,
             'source': src_host_name,
@@ -124,8 +132,9 @@ def process_intentions(headers):
             process_failures += 1
             continue
 
-    print('\nConsul-CheckPoint\nSync Status Report:\n  Successes: %s\n  Failures: %s' % (process_successes, process_failures))
-    report = {'successes': process_successes, 'failures': process_failures}
+    print('\nConsul-CheckPoint\nSync Status Report:\n  Successes: %s\n  Skips: %s\n  Failures: %s' % (
+        process_successes, process_skips, process_failures))
+    report = {'successes': process_successes, 'skips': process_skips, 'failures': process_failures}
     return report
 
 
@@ -187,8 +196,28 @@ def cp_add_object_service(headers, consul_id, dest_port):
     return svc_object_id
 
 
-def cp_get_access_rule_exists(headers, fw_rule_name, fw_layer):
-    query_payload = {'name': fw_rule_name, 'layer': fw_layer}
+def cp_get_accesslayer_exists(headers, access_layer_name):
+    query_payload = {'name': access_layer_name}
+    if OPTIONS.verbose:
+        silent = False
+        print('\nChecking if access layer exists:')
+        print(query_payload)
+    else:
+        silent = True
+
+    resp = cp_http_request(url='/web_api/show-access-layer', headers=headers, payload=query_payload,
+                           silent=silent)
+    resp = json.loads(resp.content)
+
+    if 'code' not in resp and access_layer_name == resp['name']:
+        print('\nExisting Check Point access layer found with name: %s' % access_layer_name)
+        return True
+    else:
+        return False
+
+
+def cp_get_access_rule_exists(headers, fw_rule_name, access_layer):
+    query_payload = {'name': fw_rule_name, 'layer': access_layer}
     if OPTIONS.verbose:
         silent = False
         print('\nChecking if rule exists:')
@@ -220,31 +249,33 @@ def consul_get_intentions():
         )
               )
 
-        c_src_svccat_resp = consul_get_request(url='/v1/catalog/service/' + intention['SourceName'] + '-sidecar-proxy',
-                                               silent=True)
+        c_src_svccat_resp = consul_get_request(
+            url='/v1/catalog/service/' + intention['SourceName'] + '-sidecar-proxy', silent=True)
         c_src_svccat_resp = json.loads(c_src_svccat_resp.content)
-        if OPTIONS.verbose:
-            print('\n' + json.dumps(c_src_svccat_resp, indent=2))
 
         c_dest_svccat_resp = consul_get_request(
             url='/v1/catalog/service/' + intention['DestinationName'] + '-sidecar-proxy', silent=True)
         c_dest_svccat_resp = json.loads(c_dest_svccat_resp.content)
+
         if OPTIONS.verbose:
+            print('\n' + json.dumps(c_src_svccat_resp, indent=2))
             print('\n' + json.dumps(c_dest_svccat_resp, indent=2))
 
-        if 'check_point_fw_layer' in intention['Meta']:
+        if OPTIONS.ignore_layers:
+            access_layer = 'Network'
+        elif 'check_point_access_layer' in intention['Meta']:
             # Read cosul intention metadata for Check Point Firewall layer value
-            fw_layer = intention['Meta']['check_point_fw_layer']
+            access_layer = intention['Meta']['check_point_access_layer']
         else:
             # Check Point Default layer
-            # You may want to change this so that fails instead of assuming the Network layer
-            print('Missing check_point_fw_layer in consul intention metadata. Setting layer to "Network" (Default)')
-            fw_layer = 'Network'
+            # You may want to change this so that this rule fails instead of assuming the Network layer
+            print('Missing check_point_access_layer in consul intention metadata. Setting layer to "Network" (Default)')
+            access_layer = 'Network'
 
         intentions.append({
             'id': intention['ID'].replace('-', ''),
             'action': intention['Action'],
-            'fw_layer': fw_layer,
+            'access_layer': access_layer,
             'source': {
                 'name': intention['SourceName'],
                 'localServiceAddress': c_src_svccat_resp[0]['ServiceProxy']['LocalServiceAddress'],
@@ -325,6 +356,11 @@ def main(argv=None):
                           dest='consul_socket',
                           help='Consul socket address (e.g. 10.20.1.254:8500)',
                           required=True)
+    optional.add_argument('--ignore-layers',
+                          dest='ignore_layers',
+                          default=False,
+                          help='Consul intention tag "check_point_access_layer" ignored. Default layer: "Network"',
+                          action='store_true')
     optional.add_argument('--demo-mode',
                           dest='demo_mode',
                           default=False,
@@ -333,7 +369,7 @@ def main(argv=None):
     optional.add_argument('--dry-run',
                           dest='dry_run',
                           default=False,
-                          help='Dry Run',
+                          help='Dry Run. Discard changes at the end.',
                           action='store_true')
     optional.add_argument('--verbose',
                           dest='verbose',
@@ -341,14 +377,25 @@ def main(argv=None):
                           help='Verbose output',
                           action='store_true')
 
+    if len(sys.argv) == 1:
+        parser.print_help()
+        exit(code=1)
+
+    if sys.argv[1] == '-h' or sys.argv[1] == '--help':
+        parser.print_help()
+        exit(code=1)
+
     OPTIONS = parser.parse_args(argv)
     if OPTIONS.cp_mgmt_ip and OPTIONS.consul_socket:
         print(
-            '\n:: HashiCorp Consul to Check Point firewall integration :: \nExecution time: %s \n' % str(datetime.now())
+            '\n:: HashiCorp Consul to Check Point access control integration :: \nExecution time: %s \n' % str(datetime.now())
             )
     else:
         parser.print_help()
         exit(code=1)
+
+    if OPTIONS.ignore_layers:
+        print('\nIgnore layers flag enabled. Forcing access layer of Consul intentions to: "Network"')
 
     if OPTIONS.dry_run:
         print('\nDry run enabled.')

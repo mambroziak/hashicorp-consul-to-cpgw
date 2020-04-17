@@ -249,6 +249,7 @@ def consul_get_intentions():
         )
               )
 
+        # More logic needed here to detect if a sidecar proxy is in use or not for the consul service
         c_src_svccat_resp = consul_get_request(
             url='/v1/catalog/service/' + intention['SourceName'] + '-sidecar-proxy', silent=True)
         c_src_svccat_resp = json.loads(c_src_svccat_resp.content)
@@ -272,6 +273,7 @@ def consul_get_intentions():
             print('Missing check_point_access_layer in consul intention metadata. Setting layer to "Network" (Default)')
             access_layer = 'Network'
 
+        # It is assumed that all consul source services use a side-car proxy
         intentions.append({
             'id': intention['ID'].replace('-', ''),
             'action': intention['Action'],

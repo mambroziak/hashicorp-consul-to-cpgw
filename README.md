@@ -54,7 +54,7 @@ tar -czvf site-packages.tar.gz -C ./cpgaia-pythonenv/lib/python2.7/site-packages
 scp -i ~/mykey.pem ./site-packages.tar.gz admin@<appliance-ip>:/home/admin # Verify key path, tar path, and destination path
 scp -i ~/mykey.pem ./consul_to_cpgw.py admin@<appliance-ip>:/home/admin
 ```
-### Import/deploy on Check Point appliance 
+#### Import/deploy on Check Point appliance 
 1. Login to Check Point appliance CLI as admin in expert-mode.
 1. Change to the home directory `cd ~/`
 1. Python PIP is not installed on Check Point appliances. Untar the Python libraries loaded in the previous step.
@@ -76,7 +76,7 @@ api restart
 _Create an API user_
 On the management server, create a username and password for API access with **Super User** access. These credentials will be used as environment variables during script execution.
 
-#### Setup and Run Consul Services for Demo (optional)
+### Setup and Run Consul Services for Demo (optional)
 1. Login to the Consul catalog server (https://learn.hashicorp.com/consul)
 2. Copy example Consul services from repo located in `examples/consul.d/` to Consul config directory (e.g. `/etc/consul.d`)
 3. Run Consul in the background: `nohup  consul agent -dev -enable-script-checks -config-dir=/etc/consul.d &`
@@ -111,6 +111,6 @@ Below are required* and optional arguments.
 export cp_api_user='<API-user>'
 export cp_api_pw='<password>'
 # Execution Syntax
-python consul_refresh.py --cp-mgmt-ip 10.10.1.254 --consul-socket 10.20.1.254:8500
-python consul_refresh.py --cp-mgmt-ip 10.10.1.254 --consul-socket 10.20.1.254:8500 --demo-mode --dry-run
+python consul_to_cpgw.py --cp-mgmt-ip 10.10.1.254 --consul-socket 10.20.1.254:8500
+python consul_to_cpgw.py --cp-mgmt-ip 10.10.1.254 --consul-socket 10.20.1.254:8500 --demo-mode --dry-run
 ```

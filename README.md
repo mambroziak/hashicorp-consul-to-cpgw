@@ -73,11 +73,12 @@ If not already enabled, the R80 will need to be enabled using the CLI.
 mgmt_cli -r true --domain MDS set api-settings accepted-api-calls-from "All IP addresses"
 api restart
 ```
-_Create an API user
+_Create an API user_
+On the management server, create a username and password for API access with **Super User** access. These credentials will be used as environment variables during script execution.
 
 #### Setup and Run Consul Services for Demo (optional)
 1. Login to the Consul catalog server (https://learn.hashicorp.com/consul)
-2. Copy Consul service files from _examples/consul.d/*.json_ in GitHub project to Consul (e.g. /etc/consul.d)
+2. Copy example Consul services from repo located in `examples/consul.d/` to Consul config directory (e.g. `/etc/consul.d`)
 3. Run Consul in the background: `nohup  consul agent -dev -enable-script-checks -config-dir=/etc/consul.d &`
 4. Register some intentions with the required metadata
 ```bash

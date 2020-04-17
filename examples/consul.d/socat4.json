@@ -1,0 +1,6 @@
+{"service": {
+    "name": "socat4",
+    "port": 8484,
+    "connect": { "sidecar_service": {} }
+  }
+}

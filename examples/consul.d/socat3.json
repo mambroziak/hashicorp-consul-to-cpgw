@@ -1,0 +1,6 @@
+{"service": {
+    "name": "socat3",
+    "port": 8383,
+    "connect": { "sidecar_service": {} }
+  }
+}

@@ -1,0 +1,15 @@
+{"service": {
+    "name": "web1",
+    "port": 8080,
+    "connect": {
+      "sidecar_service": {
+        "proxy": {
+          "upstreams": [{
+             "destination_name": "socat1",
+             "local_bind_port": 9191
+          }]
+        }
+      }
+    }
+  }
+}

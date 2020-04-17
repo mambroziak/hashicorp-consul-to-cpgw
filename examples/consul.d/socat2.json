@@ -1,0 +1,6 @@
+{"service": {
+    "name": "socat2",
+    "port": 8282,
+    "connect": { "sidecar_service": {} }
+  }
+}
